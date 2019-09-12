@@ -64,12 +64,13 @@ namespace Surging.Core.ProxyGenerator.Implementation
         protected async Task<T> Invoke<T>(IDictionary<string, object> parameters, string serviceId)
         {
             object result = default(T);
-            var command = await _commandProvider.GetCommand(serviceId);
+            var vt = _commandProvider.GetCommand(serviceId); 
+            var command = vt.IsCompletedSuccessfully ? vt.Result : await vt;
             RemoteInvokeResultMessage message = null;
             var decodeJOject = typeof(T) == UtilityType.ObjectType;
             IInvocation invocation = null;
             var existsInterceptor = _interceptors.Any();
-            if ((!command.RequestCacheEnabled || decodeJOject) && !existsInterceptor)
+            if ((_cacheInterceptor==null || !command.RequestCacheEnabled)  && !existsInterceptor)
             {
                 message = await _breakeRemoteInvokeService.InvokeAsync(parameters, serviceId, _serviceKey, decodeJOject);
                 if (message == null)
@@ -86,7 +87,7 @@ namespace Surging.Core.ProxyGenerator.Implementation
                     }
                 }
             }
-            if (command.RequestCacheEnabled && !decodeJOject)
+            if (_cacheInterceptor!=null && command.RequestCacheEnabled)
             {
                 invocation = GetCacheInvocation(parameters, serviceId, typeof(T));
                 var interceptReuslt = await Intercept(_cacheInterceptor, invocation);
@@ -121,7 +122,8 @@ namespace Surging.Core.ProxyGenerator.Implementation
                    type == typeof(Task) ? false : true);
             if (message == null)
             {
-                var command = await _commandProvider.GetCommand(serviceId);
+                var vt =  _commandProvider.GetCommand(serviceId); 
+                var command = vt.IsCompletedSuccessfully ? vt.Result : await vt;
                 if (command.FallBackName != null && _serviceProvider.IsRegistered<IFallbackInvoker>(command.FallBackName) && command.Strategy == StrategyType.FallBack)
                 {
                     var invoker = _serviceProvider.GetInstances<IFallbackInvoker>(command.FallBackName);
@@ -160,7 +162,8 @@ namespace Surging.Core.ProxyGenerator.Implementation
             }
             if (message == null)
             {
-                var command = await _commandProvider.GetCommand(serviceId);
+                var vt =   _commandProvider.GetCommand(serviceId);
+                var command = vt.IsCompletedSuccessfully ? vt.Result : await vt;
                 if (command.FallBackName != null && _serviceProvider.IsRegistered<IFallbackInvoker>(command.FallBackName) && command.Strategy == StrategyType.FallBack)
                 {
                     var invoker = _serviceProvider.GetInstances<IFallbackInvoker>(command.FallBackName);

@@ -1,9 +1,15 @@
 ﻿using Microsoft.Extensions.Logging;
+using Surging.Core.CPlatform.Diagnostics;
 using Surging.Core.CPlatform.Exceptions;
 using Surging.Core.CPlatform.Messages;
+using Surging.Core.CPlatform.Runtime.Client;
 using Surging.Core.CPlatform.Runtime.Server;
+using Surging.Core.CPlatform.Utilities;
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Surging.Core.CPlatform.Transport.Implementation
@@ -20,8 +26,8 @@ namespace Surging.Core.CPlatform.Transport.Implementation
         private readonly ILogger _logger;
         private readonly IServiceExecutor _serviceExecutor;
 
-        private readonly ConcurrentDictionary<string, TaskCompletionSource<TransportMessage>> _resultDictionary =
-            new ConcurrentDictionary<string, TaskCompletionSource<TransportMessage>>();
+        private readonly ConcurrentDictionary<string, ManualResetValueTaskSource<TransportMessage>> _resultDictionary =
+            new ConcurrentDictionary<string, ManualResetValueTaskSource<TransportMessage>>();
 
         #endregion Field
 
@@ -46,7 +52,8 @@ namespace Surging.Core.CPlatform.Transport.Implementation
         /// </summary>
         /// <param name="message">远程调用消息模型。</param>
         /// <returns>远程调用消息的传输消息。</returns>
-        public async Task<RemoteInvokeResultMessage> SendAsync(RemoteInvokeMessage message)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public async Task<RemoteInvokeResultMessage> SendAsync(RemoteInvokeMessage message, CancellationToken cancellationToken)
         {
             try
             {
@@ -54,9 +61,9 @@ namespace Surging.Core.CPlatform.Transport.Implementation
                     _logger.LogDebug("准备发送消息。");
 
                 var transportMessage = TransportMessage.CreateInvokeMessage(message);
-
+                WirteDiagnosticBefore(transportMessage);
                 //注册结果回调
-                var callbackTask = RegisterResultCallbackAsync(transportMessage.Id);
+                var callbackTask = RegisterResultCallbackAsync(transportMessage.Id,cancellationToken);
 
                 try
                 {
@@ -92,7 +99,7 @@ namespace Surging.Core.CPlatform.Transport.Implementation
             (_messageListener as IDisposable)?.Dispose();
             foreach (var taskCompletionSource in _resultDictionary.Values)
             {
-                taskCompletionSource.TrySetCanceled();
+                taskCompletionSource.SetCanceled();
             }
         }
 
@@ -105,24 +112,25 @@ namespace Surging.Core.CPlatform.Transport.Implementation
         /// </summary>
         /// <param name="id">消息Id。</param>
         /// <returns>远程调用结果消息模型。</returns>
-        private async Task<RemoteInvokeResultMessage> RegisterResultCallbackAsync(string id)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private async Task<RemoteInvokeResultMessage> RegisterResultCallbackAsync(string id, CancellationToken cancellationToken)
         {
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug($"准备获取Id为：{id}的响应内容。");
 
-            var task = new TaskCompletionSource<TransportMessage>();
+            var task = new ManualResetValueTaskSource<TransportMessage>();
             _resultDictionary.TryAdd(id, task);
             try
             {
-                var result = await task.Task;
+                var result = await task.AwaitValue(cancellationToken);
                 return result.GetContent<RemoteInvokeResultMessage>();
             }
             finally
             {
                 //删除回调任务
-                TaskCompletionSource<TransportMessage> value;
+                ManualResetValueTaskSource<TransportMessage> value;
                 _resultDictionary.TryRemove(id, out value);
-                value.TrySetCanceled();
+                value.SetCanceled();
             }
         }
 
@@ -131,7 +139,7 @@ namespace Surging.Core.CPlatform.Transport.Implementation
             if (_logger.IsEnabled(LogLevel.Trace))
                 _logger.LogTrace("服务消费者接收到消息。");
 
-            TaskCompletionSource<TransportMessage> task;
+            ManualResetValueTaskSource<TransportMessage> task;
             if (!_resultDictionary.TryGetValue(message.Id, out task))
                 return;
 
@@ -140,15 +148,70 @@ namespace Surging.Core.CPlatform.Transport.Implementation
                 var content = message.GetContent<RemoteInvokeResultMessage>();
                 if (!string.IsNullOrEmpty(content.ExceptionMessage))
                 {
-                    task.TrySetException(new CPlatformCommunicationException(content.ExceptionMessage,content.StatusCode));
+                    task.SetException(new CPlatformCommunicationException(content.ExceptionMessage,content.StatusCode));
+                    WirteDiagnosticError(message);
                 }
                 else
                 {
                     task.SetResult(message);
+                    WirteDiagnosticAfter(message);
                 }
             }
             if (_serviceExecutor != null && message.IsInvokeMessage())
                 await _serviceExecutor.ExecuteAsync(sender, message);
+        }
+
+
+        private void WirteDiagnosticBefore(TransportMessage message)
+        {
+            if (!AppConfig.ServerOptions.DisableDiagnostic)
+            {
+                var diagnosticListener = new DiagnosticListener(DiagnosticListenerExtensions.DiagnosticListenerName);
+                var remoteInvokeMessage = message.GetContent<RemoteInvokeMessage>();
+                remoteInvokeMessage.Attachments.TryGetValue("TraceId", out object traceId);
+                diagnosticListener.WriteTransportBefore(TransportType.Rpc, new TransportEventData(new DiagnosticMessage
+                {
+                    Content = message.Content,
+                    ContentType = message.ContentType,
+                    Id = message.Id,
+                    MessageName = remoteInvokeMessage.ServiceId
+                }, remoteInvokeMessage.DecodeJOject ? RpcMethod.Json_Rpc.ToString() : RpcMethod.Proxy_Rpc.ToString(),
+                 traceId?.ToString(),
+                RpcContext.GetContext().GetAttachment("RemoteAddress")?.ToString()));
+            }
+            var parameters = RpcContext.GetContext().GetContextParameters();
+            parameters.TryRemove("RemoteAddress", out object value);
+            RpcContext.GetContext().SetContextParameters(parameters);
+        }
+
+        private void WirteDiagnosticAfter(TransportMessage message)
+        {
+            if (!AppConfig.ServerOptions.DisableDiagnostic)
+            {
+                var diagnosticListener = new DiagnosticListener(DiagnosticListenerExtensions.DiagnosticListenerName);
+                var remoteInvokeResultMessage = message.GetContent<RemoteInvokeResultMessage>();
+                diagnosticListener.WriteTransportAfter(TransportType.Rpc, new ReceiveEventData(new DiagnosticMessage
+                {
+                    Content = message.Content,
+                    ContentType = message.ContentType,
+                    Id = message.Id
+                }));
+            }
+        }
+
+        private void WirteDiagnosticError(TransportMessage message)
+        {
+            if (!AppConfig.ServerOptions.DisableDiagnostic)
+            {
+                var diagnosticListener = new DiagnosticListener(DiagnosticListenerExtensions.DiagnosticListenerName);
+                var remoteInvokeResultMessage = message.GetContent<RemoteInvokeResultMessage>();
+                diagnosticListener.WriteTransportError(TransportType.Rpc, new TransportErrorEventData(new DiagnosticMessage
+                {
+                    Content = message.Content,
+                    ContentType = message.ContentType,
+                    Id = message.Id
+                }, new CPlatformCommunicationException(remoteInvokeResultMessage.ExceptionMessage)));
+            }
         }
 
         #endregion Private Method

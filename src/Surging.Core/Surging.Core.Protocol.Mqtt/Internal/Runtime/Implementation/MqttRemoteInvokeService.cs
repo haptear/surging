@@ -55,8 +55,8 @@ namespace Surging.Core.Protocol.Mqtt.Internal.Runtime.Implementation
                         var endPoint = address.CreateEndPoint();
                         if (_logger.IsEnabled(LogLevel.Debug))
                             _logger.LogDebug($"使用地址：'{endPoint}'进行调用。");
-                        var client = _transportClientFactory.CreateClient(endPoint);
-                        await client.SendAsync(invokeMessage).WithCancellation(cancellationToken);
+                        var client =await _transportClientFactory.CreateClientAsync(endPoint);
+                        await client.SendAsync(invokeMessage, cancellationToken).WithCancellation(cancellationToken);
                     }
                     catch (CommunicationException)
                     {
@@ -88,8 +88,11 @@ namespace Surging.Core.Protocol.Mqtt.Internal.Runtime.Implementation
                             var endPoint = address.CreateEndPoint();
                             if (_logger.IsEnabled(LogLevel.Debug))
                                 _logger.LogDebug($"使用地址：'{endPoint}'进行调用。");
-                            var client = _transportClientFactory.CreateClient(endPoint);
-                            await client.SendAsync(invokeMessage).WithCancellation(requestTimeout);
+                            var client =await _transportClientFactory.CreateClientAsync(endPoint);
+                            using (var cts = new CancellationTokenSource())
+                            {
+                                await client.SendAsync(invokeMessage,cts.Token).WithCancellation(cts,requestTimeout);
+                            }
                         }
                         catch (CommunicationException)
                         {

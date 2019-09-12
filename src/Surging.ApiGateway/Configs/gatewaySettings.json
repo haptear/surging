@@ -3,7 +3,7 @@
   "AuthorizationRoutePath": "api/user/authentication",
   "AuthorizationServiceKey": "User",
   "TokenEndpointPath": "api/oauth2/token",
-  "CacheMode": "ddlCache.Redis", //MemoryCache or  gateway.Redis save token
+  "CacheMode": "MemoryCache", //MemoryCache or  gateway.Redis save token
   "AccessPolicy": {
     "Origins": [ "http://127.0.0.1:1927", "http://localhost:927" ],
     "AllowAnyHeader": true,
@@ -11,7 +11,7 @@
   },
   "Register": {
     "Provider": "Consul",
-    "Address": "${Register_Conn}|127.0.0.1:8500"
+    "Address": "${Register_Conn}|127.0.0.1:8500" //127.0.0.1:8500,127.0.0.1:9500
   },
   "ServicePart": {
     "MainPath": "part/service/aggregation",
